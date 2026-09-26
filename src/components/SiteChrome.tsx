@@ -45,6 +45,8 @@ export default function SiteChrome() {
           inset: "0",
           zIndex: "400",
           overflow: "hidden",
+          // The cloud layers never affect, or are affected by, page layout.
+          contain: "strict",
         }}
       >
         <div
@@ -118,6 +120,53 @@ export default function SiteChrome() {
               000
             </span>
           </span>
+        </div>
+        {/* Page transitions: the lamp-arch and the destination rise out of the clouds. */}
+        <div
+          data-transui="1"
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            inset: "0",
+            opacity: "0",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: "22px",
+            textAlign: "center",
+            color: "#2A1A0E",
+            padding: "0 6vw",
+            pointerEvents: "none",
+          }}
+        >
+          <svg
+            viewBox="0 0 120 150"
+            width="38"
+            height="48"
+            aria-hidden="true"
+            style={{ color: "#9E3418" }}
+          >
+            <path fill="currentColor" fillRule="evenodd" d={ARCH_PATH} />
+          </svg>
+          <span
+            data-transname="1"
+            style={{
+              fontFamily: "var(--serif)",
+              fontSize: "clamp(44px,7vw,120px)",
+              lineHeight: "1",
+            }}
+          />
+        </div>
+        {/* Destination names in the current language, read by the runtime. */}
+        <div hidden>
+          {MENU_NAV.map((item) => (
+            <span key={item.route} data-destlabel={item.route}>
+              {item.rich
+                ? rich(t("nav.sevaRich"), { color: "#9E3418" })
+                : t(`nav.${item.route}`)}
+            </span>
+          ))}
         </div>
       </div>
       <div
