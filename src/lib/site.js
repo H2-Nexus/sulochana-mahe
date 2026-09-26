@@ -23,6 +23,200 @@
 
   const seeded = (s) => () => (s = (s * 16807) % 2147483647) / 2147483647;
 
+  /* ---------- clouds (persistent) ----------
+     The overlay lives in the root layout and outlives every page runtime, so its
+     state lives here, not in a page's gsap context. Reverting that context on
+     navigation used to snap the puffs home and restart their drift while the
+     clouds were closed. Every close/open tweens from wherever the puffs are, so
+     a click mid-parting folds the clouds back in without a jump. */
+  function makeClouds(g, el) {
+    const $in = (s) => el.querySelector(s);
+    const sky = $in("[data-sky]"),
+      wrap = $in("[data-puffs]"),
+      trans = $in("[data-transui]"),
+      transName = $in("[data-transname]");
+    if (!wrap.childElementCount) {
+      const r = seeded(11);
+      const tints = ["226,176,96", "240,214,160", "248,236,210", "253,248,238"];
+      for (let i = 0; i < 46; i++) {
+        const layer = i % 4;
+        const x = r() * 120 - 10,
+          y = r() * 120 - 10,
+          s = 34 + r() * 40 + layer * 5;
+        const c = tints[layer];
+        const d = document.createElement("div");
+        d.setAttribute("data-puff", "");
+        d.style.cssText = `position:absolute;left:calc(${x}% - ${s / 2}vmax);top:calc(${y}% - ${s / 2}vmax);width:${s}vmax;height:${s}vmax;border-radius:50%;background:radial-gradient(closest-side, rgba(${c},1) 0%, rgba(${c},.82) 38%, rgba(${c},.35) 70%, rgba(${c},0) 100%);will-change:transform`;
+        const dx = x - 50 || 1,
+          dy = y - 50,
+          len = Math.hypot(dx, dy);
+        d._ox = (dx / len) * (0.9 + r() * 0.5);
+        d._oy = (dy / len) * (0.9 + r() * 0.5);
+        wrap.appendChild(d);
+      }
+    }
+    const puffs = Array.from(wrap.querySelectorAll("[data-puff]"));
+    const outX = (i) => puffs[i]._ox * window.innerWidth;
+    const outY = (i) => puffs[i]._oy * window.innerHeight;
+
+    // The first paint shows the overlay closed. The drift only runs while the
+    // clouds are on screen: 46 viewport-sized layers restyled every frame for
+    // the life of the page cost frames everywhere else.
+    g.set(puffs, { x: 0, y: 0, scale: 1 });
+    const drift = puffs.map((p, i) =>
+      g.to(p, {
+        xPercent: (i % 2 ? 1 : -1) * (4 + (i % 5)),
+        yPercent: (i % 3 ? -1 : 1) * 3,
+        duration: 5 + (i % 4),
+        ease: "sine.inOut",
+        yoyo: true,
+        repeat: -1,
+      }),
+    );
+    const drifting = (on) => drift.forEach((t) => (on ? t.play() : t.pause()));
+    const show = () => {
+      drifting(true);
+      g.set(el, { visibility: "visible", pointerEvents: "auto" });
+    };
+
+    let tl = null,
+      failsafe = 0;
+    const run = (t) => {
+      if (tl) tl.kill();
+      return (tl = t);
+    };
+    // If no page claims the closed clouds (a failed navigation), part them anyway.
+    const arm = () => {
+      clearTimeout(failsafe);
+      failsafe = setTimeout(() => api.open(false), 8000);
+    };
+    const onPop = () => {
+      if (location.pathname !== api.path) api.snap();
+    };
+    window.addEventListener("popstate", onPop);
+
+    const api = {
+      el,
+      covered: true,
+      // True while the clouds are closing or closed; route clicks wait it out.
+      busy: true,
+      path: location.pathname,
+      // A page runtime took over the closed clouds and will open them.
+      claim() {
+        clearTimeout(failsafe);
+      },
+      // The clouds answer the click on the very next frame (an ease-out, not an
+      // ease-in that idles for a third of its run), and the page is swapped as
+      // soon as the screen is covered; the name keeps surfacing over the swap.
+      // Only transform and opacity animate here: a filter on this full-viewport
+      // layer re-blurred the whole screen every frame.
+      close(destHTML, cb) {
+        clearTimeout(failsafe);
+        api.busy = api.covered = true;
+        transName.innerHTML = destHTML || "";
+        show();
+        run(g.timeline())
+          .to(
+            puffs,
+            {
+              x: 0,
+              y: 0,
+              scale: 1,
+              duration: 0.85,
+              ease: "power3.out",
+              stagger: { each: 0.004, from: "edges" },
+            },
+            0,
+          )
+          .to(sky, { opacity: 1, duration: 0.6, ease: "power2.out" }, 0.05)
+          // The lamp-arch and the destination surface out of the cloud bank,
+          // echoing the loader, and hold there while the next page loads.
+          .fromTo(
+            trans,
+            { opacity: 0, y: 18 },
+            { opacity: 1, y: 0, duration: 0.8, ease: "expo.out" },
+            0.3,
+          )
+          .add(() => {
+            arm();
+            cb && cb();
+          }, 0.8);
+      },
+      // Back/forward: Next renders the next page on its own, so cover at once,
+      // before it paints, rather than let it flash and close over it.
+      snap() {
+        run(null);
+        api.busy = api.covered = true;
+        show();
+        g.set(puffs, { x: 0, y: 0, scale: 1 });
+        g.set(sky, { opacity: 1 });
+        g.set(trans, { opacity: 0 });
+        arm();
+      },
+      open(first, cb) {
+        clearTimeout(failsafe);
+        return run(
+          g.timeline({
+            onComplete: () => {
+              g.set(el, { visibility: "hidden" });
+              drifting(false);
+              api.covered = false;
+              cb && cb();
+            },
+          }),
+        )
+          .to(
+            trans,
+            { opacity: 0, y: -24, duration: 0.45, ease: "power2.in" },
+            0,
+          )
+          // The first visit keeps its slow, ceremonial parting; a page change
+          // parts at once so the new page is there the moment it is ready.
+          .to(
+            puffs,
+            {
+              x: outX,
+              y: outY,
+              scale: 1.7,
+              duration: first ? 2.6 : 1.3,
+              ease: first ? "expo.inOut" : "power3.inOut",
+              stagger: { each: first ? 0.012 : 0.004, from: "center" },
+            },
+            first ? 0.15 : 0.05,
+          )
+          .to(
+            sky,
+            {
+              opacity: 0,
+              duration: first ? 1.4 : 0.9,
+              ease: first ? "power2.inOut" : "power2.out",
+            },
+            first ? 0.7 : 0.2,
+          )
+          // Hand the page back once the centre has cleared.
+          .add(() => {
+            g.set(el, { pointerEvents: "none" });
+            api.busy = false;
+          }, first ? 1.1 : 0.55);
+      },
+      kill() {
+        run(null);
+        clearTimeout(failsafe);
+        drift.forEach((t) => t.kill());
+        window.removeEventListener("popstate", onPop);
+      },
+    };
+    return api;
+  }
+  // One controller per overlay element (a fresh one only if the layout remounts).
+  function getClouds(g) {
+    const el = document.querySelector("[data-clouds]");
+    let c = Site._clouds;
+    if (c && c.el === el) return c;
+    if (c) c.kill();
+    return (Site._clouds = makeClouds(g, el));
+  }
+
   Site.init = function (opts) {
     opts = opts || {};
     const g = window.gsap,
@@ -60,9 +254,7 @@
     if ("scrollRestoration" in history) history.scrollRestoration = "manual";
     if (!location.hash) window.scrollTo(0, 0);
 
-    const clouds = $("[data-clouds]"),
-      sky = $("[data-sky]"),
-      ui = $("[data-loadui]");
+    const ui = $("[data-loadui]");
 
     const tickClock = () => {
       try {
@@ -78,7 +270,7 @@
     };
     tickClock();
     if (isStatic) {
-      clouds.style.display = "none";
+      $("[data-clouds]").style.display = "none";
       $$("[data-track]").forEach((t) => {
         t.style.flexWrap = "wrap";
         t.style.width = "auto";
@@ -100,53 +292,30 @@
     lenis.stop();
 
     /* ---------- clouds ---------- */
-    const puffWrap = $("[data-puffs]");
-    if (!puffWrap.childElementCount) {
-      const r = seeded(11);
-      const tints = ["226,176,96", "240,214,160", "248,236,210", "253,248,238"];
-      for (let i = 0; i < 46; i++) {
-        const layer = i % 4;
-        const x = r() * 120 - 10,
-          y = r() * 120 - 10,
-          s = 34 + r() * 40 + layer * 5;
-        const c = tints[layer];
-        const d = document.createElement("div");
-        d.setAttribute("data-puff", "");
-        d.style.cssText = `position:absolute;left:calc(${x}% - ${s / 2}vmax);top:calc(${y}% - ${s / 2}vmax);width:${s}vmax;height:${s}vmax;border-radius:50%;background:radial-gradient(closest-side, rgba(${c},1) 0%, rgba(${c},.82) 38%, rgba(${c},.35) 70%, rgba(${c},0) 100%);will-change:transform`;
-        const dx = x - 50 || 1,
-          dy = y - 50,
-          len = Math.hypot(dx, dy);
-        d._ox = (dx / len) * (0.9 + r() * 0.5);
-        d._oy = (dy / len) * (0.9 + r() * 0.5);
-        puffWrap.appendChild(d);
-      }
-    }
-    const puffs = $$("[data-puff]", puffWrap);
-    const outX = (i) => puffs[i]._ox * window.innerWidth;
-    const outY = (i) => puffs[i]._oy * window.innerHeight;
+    const clouds = getClouds(g);
+    // Arriving without a cloud transition (first load is already covered; a
+    // remount or back/forward may not be): close them before anything moves.
+    if (!clouds.covered) clouds.snap();
+    clouds.claim();
+    clouds.path = location.pathname;
+    // Destination name shown in the clouds; a painting's page reads as Works.
+    const destHTML = (route) => {
+      const s = $(
+        `[data-destlabel="${route === "work" ? "works" : route}"]`,
+      );
+      return s ? s.innerHTML : "";
+    };
+    let dead = false;
 
     let menuOpen = false,
       menuTl;
     const ctx = g.context(() => {});
 
     ctx.add(() => {
-      g.set(clouds, { visibility: "visible", pointerEvents: "auto" });
-      g.set(puffs, { x: 0, y: 0, scale: 1 });
-      puffs.forEach((p, i) =>
-        g.to(p, {
-          xPercent: (i % 2 ? 1 : -1) * (4 + (i % 5)),
-          yPercent: (i % 3 ? -1 : 1) * 3,
-          duration: 5 + (i % 4),
-          ease: "sine.inOut",
-          yoyo: true,
-          repeat: -1,
-        }),
-      );
-
       g.set("[data-hchar]", { yPercent: 115, rotate: 5 });
       g.set("[data-hfade]", { opacity: 0, y: 26 });
       g.set("[data-hclip]", { clipPath: "inset(100% 0% 0% 0%)" });
-      g.set("[data-hclipimg]", { scale: 1.4 });
+      g.set("[data-hclipimg]", { scale: 1.4, force3D: false });
       g.set("[data-nav]", { yPercent: -120 });
       g.set("[data-menufab]", { scale: 0 });
 
@@ -160,7 +329,7 @@
     ctx.add(() => {
       const first = !sessionStorage.getItem("sm-loaded");
       sessionStorage.setItem("sm-loaded", "1");
-      const tl = g.timeline();
+      const tl = g.timeline({ paused: true });
       if (first) {
         const count = $("[data-loadcount]"),
           c = { v: 0 };
@@ -201,54 +370,71 @@
             },
             0,
           )
-          .addLabel("part", "+=0.25");
+          .addLabel("part", "+=0.25")
+          .to(
+            ui,
+            {
+              opacity: 0,
+              y: -40,
+              filter: "blur(10px)",
+              duration: 0.8,
+              ease: "power2.in",
+            },
+            "part",
+          )
+          // The loader is done with; drop its full-screen filter layer.
+          .set(ui, { clearProps: "filter,transform" });
       } else {
-        tl.set(ui, { opacity: 0 }).addLabel("part", "+=0.15");
+        // A page change: the loader stays hidden and untouched.
+        tl.set(ui, { opacity: 0 }).addLabel("part", 0);
       }
-      tl.to(
-        ui,
-        {
-          opacity: 0,
-          y: -40,
-          filter: "blur(10px)",
-          duration: 0.8,
-          ease: "power2.in",
-        },
-        "part",
-      )
-        .to(
-          puffs,
-          {
-            x: outX,
-            y: outY,
-            scale: 1.7,
-            duration: first ? 2.6 : 1.8,
-            ease: "expo.inOut",
-            stagger: { each: first ? 0.012 : 0.006, from: "center" },
-          },
-          "part+=0.15",
-        )
-        .to(
-          sky,
-          { opacity: 0, duration: 1.4, ease: "power2.inOut" },
-          first ? "part+=0.7" : "part+=0.35",
-        )
-        .set(clouds, { visibility: "hidden", pointerEvents: "none" })
-        .addLabel("reveal", first ? "part+=0.9" : "part+=0.45");
+      let parted = false;
+      tl.add(() => {
+        if (parted) return;
+        parted = true;
+        clouds.open(first);
+      }, "part").addLabel("reveal", first ? "part+=0.9" : "part+=0.25");
       heroIntro(tl, "reveal");
       page.intro && page.intro(tl, "reveal", { g, $, $$ });
       tl.add(() => lenis.start(), "reveal+=0.9");
+      // Part the clouds only once the page's fonts have settled (the Malayalam
+      // faces load on demand), so no text reflows after it is revealed. The
+      // first visit's loader already runs long enough.
+      const settled = first
+        ? Promise.resolve()
+        : Promise.race([
+            document.fonts ? document.fonts.ready : Promise.resolve(),
+            new Promise((r) => setTimeout(r, 500)),
+          ]);
+      settled.then(() =>
+        requestAnimationFrame(() => {
+          if (!dead) tl.play();
+        }),
+      );
     });
 
+    // The hero image scales inside a box whose clip-path is animating. Left to
+    // force3D:"auto", GSAP lifts the image onto its own GPU layer for the tween,
+    // and Chrome then clips it with a separately rasterised mask that trails
+    // the moving clip edge by a frame: slivers of the image flash outside the
+    // box and a hairline outlines the arch; when the tween ends the layer drops
+    // back and the image visibly re-sharpens. Painted in 2D, the image is
+    // clipped in the same paint as the box. Once revealed, the clip-path is
+    // removed so it doesn't double the overflow edge's anti-aliasing.
     function heroIntro(tl, at) {
       tl.to(
         "[data-hclip]",
-        { clipPath: "inset(0% 0% 0% 0%)", duration: 1.6, ease: "expo.inOut" },
+        {
+          clipPath: "inset(0% 0% 0% 0%)",
+          duration: 1.6,
+          ease: "expo.inOut",
+          clearProps: "clipPath",
+        },
         at,
       )
         .to(
           "[data-hclipimg]",
-          { scale: 1, duration: 2.2, ease: "expo.out" },
+          { scale: 1, duration: 2.2, ease: "expo.out", force3D: false },
           at,
         )
         .to(
@@ -279,62 +465,16 @@
         );
     }
 
-    function cover(cb) {
-      lenis.stop();
-      ctx.add(() => {
-        g.set(clouds, { visibility: "visible", pointerEvents: "auto" });
-        g.set(ui, { opacity: 0 });
-        g.timeline({ onComplete: cb })
-          .fromTo(
-            puffs,
-            { x: outX, y: outY, scale: 1.7 },
-            {
-              x: 0,
-              y: 0,
-              scale: 1,
-              duration: 1.15,
-              ease: "expo.inOut",
-              stagger: { each: 0.006, from: "edges" },
-            },
-            0,
-          )
-          .fromTo(
-            sky,
-            { opacity: 0 },
-            { opacity: 1, duration: 0.8, ease: "power2.inOut" },
-            0.35,
-          );
-      });
-    }
-    function uncover(cb) {
-      ctx.add(() => {
-        g.timeline({ onComplete: cb })
-          .to(
-            puffs,
-            {
-              x: outX,
-              y: outY,
-              scale: 1.7,
-              duration: 1.6,
-              ease: "expo.inOut",
-              stagger: { each: 0.006, from: "center" },
-            },
-            0,
-          )
-          .to(sky, { opacity: 0, duration: 1.1, ease: "power2.inOut" }, 0.3)
-          .set(clouds, { visibility: "hidden", pointerEvents: "none" });
-      });
-    }
-
     /* ---------- in-place content swap (language change) ----------
        Clouds close, `apply` updates the DOM (it may return a promise), scroll
        effects re-bind to the new text, then the clouds part again. The scroll
        position is kept. */
     let swapping = false;
     function transition(apply) {
-      if (swapping) return;
+      if (swapping || clouds.busy) return;
       swapping = true;
-      cover(() => {
+      lenis.stop();
+      clouds.close("", () => {
         if (menuOpen) {
           toggleMenu(false);
           menuTl.progress(0).pause();
@@ -345,8 +485,9 @@
           setTimeout(done, 1500);
         }).then(() =>
           requestAnimationFrame(() => {
+            if (dead) return;
             rebuild();
-            uncover(() => {
+            clouds.open(false, () => {
               swapping = false;
               lenis.start();
             });
@@ -541,10 +682,26 @@
         g.set(fl, { xPercent: -50, yPercent: -50, scale: 0.6, opacity: 0 });
         const fx = g.quickTo(fl, "x", { duration: 0.6, ease: "power3" }),
           fy = g.quickTo(fl, "y", { duration: 0.6, ease: "power3" });
-        let active = null;
+        let active = null,
+          px = -1,
+          py = -1;
+        // Pick the row under the cursor by hit-testing, so the preview also
+        // follows along when the page scrolls under a still cursor (the browser
+        // doesn't reliably fire pointerenter for that).
+        const syncRow = () => {
+          if (px < 0) return;
+          const el = document.elementFromPoint(px, py);
+          const r = el && el.closest("[data-row]");
+          if (r && rows.includes(r)) enter(r, { clientX: px, clientY: py });
+        };
+        onR(window, "pointermove", (e) => {
+          px = e.clientX;
+          py = e.clientY;
+        }, { passive: true });
         onR(list, "pointermove", (e) => {
           fx(e.clientX);
           fy(e.clientY);
+          syncRow();
         });
         const enter = (r, e) => {
           if (active === r) return;
@@ -610,13 +767,13 @@
           });
         };
         rows.forEach((r) => {
-          onR(r, "pointerenter", (e) => enter(r, e));
           onR(r, "focus", () => enter(r));
           onR(r, "blur", leaveAll);
         });
         onR($("[data-rows]", list) || list, "pointerleave", leaveAll);
         roff.push(
           lenis.on("scroll", () => {
+            syncRow();
             if (!active) return;
             const b = list.getBoundingClientRect();
             if (b.bottom < 0 || b.top > innerHeight) leaveAll();
@@ -1007,6 +1164,8 @@
         }
         if (!a.hasAttribute("data-route")) return;
         e.preventDefault();
+        // Already on the way somewhere: a second click must not restart the clouds.
+        if (clouds.busy || swapping) return;
         // Same route name is not enough: /works/a → /works/b are both "work".
         const same =
           a.dataset.route === opts.page &&
@@ -1022,7 +1181,8 @@
           menuOpen = false;
           lenis.start();
         }
-        cover(() => navigate(href));
+        lenis.stop();
+        clouds.close(destHTML(a.dataset.route), () => navigate(href));
       },
       true,
     );
@@ -1151,6 +1311,7 @@
 
     Site.current = { lenis, rebuild, transition, page: opts.page };
     const destroy = function () {
+      dead = true;
       Site.current = null;
       roff.forEach((f) => f && f());
       rctx && rctx.revert();
